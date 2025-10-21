@@ -235,4 +235,76 @@
     (map-get? borrower-profiles borrower)
 )
 
+;; NEW FEATURE: Comprehensive dynamic risk recalculation and loan management
+;; This function performs a complete risk reassessment of an active loan
+;; considering current market conditions, collateral value changes, and borrower behavior
+;; It automatically adjusts interest rates, triggers warnings, or initiates liquidations
+(define-public (perform-dynamic-risk-assessment 
+    (borrower principal) 
+    (current-collateral-value uint))
+    (let
+        (
+            (loan (unwrap! (map-get? loans borrower) err-not-found))
+            (profile (unwrap! (map-get? borrower-profiles borrower) err-not-found))
+            (blocks-elapsed (- block-height (get last-update-block loan)))
+            
+            ;; Calculate accrued interest based on blocks elapsed
+            ;; Assuming ~144 blocks per day, ~52560 blocks per year
+            (interest-accrued (/ (* (* (get loan-amount loan) (get interest-rate loan)) blocks-elapsed) 
+                                 (* u52560 u10000)))
+            (total-debt (+ (get loan-amount loan) interest-accrued))
+            
+            ;; Calculate new health metrics
+            (new-health-ratio (calculate-health-ratio current-collateral-value total-debt))
+            (volatility (var-get global-volatility-index))
+            (adjustment-factor (var-get risk-adjustment-factor))
+            
+            ;; Adjust risk score based on market volatility and time
+            (time-risk-increase (/ blocks-elapsed u1000))
+            (base-risk-score (calculate-risk-score new-health-ratio volatility (get defaults profile)))
+            (adjusted-risk-score (+ base-risk-score time-risk-increase))
+            
+            ;; Calculate new interest rate based on updated risk
+            (new-interest-rate (calculate-interest-rate new-health-ratio (get reputation-score profile)))
+            (adjusted-interest-rate (/ (* new-interest-rate adjustment-factor) u10000))
+        )
+        ;; Ensure loan is active
+        (asserts! (get is-active loan) err-not-found)
+        
+        ;; Check if loan should be liquidated
+        (if (< new-health-ratio liquidation-threshold)
+            (begin
+                (map-set loans borrower (merge loan {is-active: false}))
+                (update-reputation borrower "default")
+                (ok {
+                    action: "liquidated",
+                    health-ratio: new-health-ratio,
+                    risk-score: adjusted-risk-score,
+                    new-interest-rate: u0,
+                    liquidation-penalty: (var-get liquidation-penalty)
+                })
+            )
+            ;; Update loan with new parameters
+            (begin
+                (map-set loans borrower {
+                    collateral-amount: (get collateral-amount loan),
+                    loan-amount: total-debt,
+                    interest-rate: adjusted-interest-rate,
+                    risk-score: (if (> adjusted-risk-score u10000) u10000 adjusted-risk-score),
+                    last-update-block: block-height,
+                    is-active: true
+                })
+                (ok {
+                    action: "updated",
+                    health-ratio: new-health-ratio,
+                    risk-score: (if (> adjusted-risk-score u10000) u10000 adjusted-risk-score),
+                    new-interest-rate: adjusted-interest-rate,
+                    liquidation-penalty: u0
+                })
+            )
+        )
+    )
+)
+
+
 
